@@ -6,55 +6,33 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sklearn.tree import DecisionTreeRegressor
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# 10 stations, map coordinates (same as frontend)
+# 15 stations with coordinates
 GRAPH_NODES = {
-    "S1": (100, 100),   "S2": (260, 60),   "S3": (420, 80),
-    "S4": (600, 100),   "S5": (680, 250),  "S6": (620, 400),
-    "S7": (400, 360),   "S8": (230, 350),  "S9": (110, 250),
-    "S10": (330, 180)
+    "S1": (100, 100),  "S2": (260, 60),  "S3": (420, 80),
+    "S4": (600, 100),  "S5": (680, 250), "S6": (620, 400),
+    "S7": (400, 360),  "S8": (230, 350), "S9": (110, 250),
+    "S10": (330, 180), "S11": (520, 250), "S12": (550, 350),
+    "S13": (720, 320), "S14": (140, 170), "S15": (700, 450)
 }
 GRAPH_EDGES = [
     ("S1","S2"), ("S2","S3"), ("S3","S4"), ("S4","S5"),
     ("S5","S6"), ("S6","S7"), ("S7","S8"), ("S8","S9"), ("S9","S1"),
-    ("S3","S10"), ("S10","S7"), ("S2","S10"), ("S10","S8")
+    ("S3","S10"), ("S10","S7"), ("S2","S10"), ("S10","S8"),
+    ("S5","S11"), ("S11","S12"), ("S12","S6"), ("S11","S13"),
+    ("S9","S14"), ("S13","S15"), ("S6","S15")
 ]
 G = nx.Graph()
 for u, v in GRAPH_EDGES:
     G.add_edge(u, v, weight=1)
 
-# --- State ---
-TRAIN = None   # Only last scheduled train
-RESERVATIONS = {}  # (edge, timestep) -> train_id
+# State
+TRAIN = None
+RESERVATIONS = {}
 CLIENTS = set()
-
-# --- ML Model ---
-X_train, y_train = [], []
-ml_model = DecisionTreeRegressor()
-model_trained = False
-
-def train_ml_model():
-    global model_trained, ml_model
-    if len(X_train) >= 8:
-        try:
-            ml_model.fit(X_train, y_train)
-            model_trained = True
-        except Exception:
-            model_trained = False
-
-def ml_predict_start_time(priority, delay, congestion):
-    if model_trained:
-        try:
-            features = np.array([[priority, delay, congestion]])
-            pred = ml_model.predict(features)
-            return max(0, int(round(pred[0])))
-        except Exception:
-            return 0
-    return 0
 
 def edge_key(u, v):
     return tuple(sorted((u, v)))
@@ -79,7 +57,7 @@ async def simulate_train(train):
     t_step = train["start_time"]
     path = train["path"]
     src = path[0]
-    await asyncio.sleep(train["delay"])
+    await asyncio.sleep(0)  # no delay now
     for i in range(len(path) - 1):
         u, v = path[i], path[i + 1]
         u_pos, v_pos = GRAPH_NODES[u], GRAPH_NODES[v]
@@ -94,10 +72,6 @@ async def simulate_train(train):
     train["status"] = "arrived"
     train["position"] = GRAPH_NODES[path[-1]]
     await broadcast({"type": "train_update", "train": train})
-    # ML train
-    X_train.append([train["priority"], train["delay"], train["congestion"]])
-    y_train.append(train["start_time"])
-    train_ml_model()
 
 @app.post("/schedule_train")
 async def schedule_train(req: Request):
@@ -107,21 +81,11 @@ async def schedule_train(req: Request):
         return JSONResponse({"error": "invalid json body", "detail": str(e)}, status_code=400)
     src = t.get("source")
     dst = t.get("destination")
-    if src not in GRAPH_NODES or dst not in GRAPH_NODES or src==dst:
+    if src not in GRAPH_NODES or dst not in GRAPH_NODES or src == dst:
         return JSONResponse({"ok": False, "error": "invalid source/destination"})
-    try:
-        delay = int(t.get("delay", 0))
-    except Exception:
-        delay = 0
-    try:
-        priority = int(t.get("priority", 1))
-    except Exception:
-        priority = 1
-    # Congestion: count reservations for edges at src
-    congestion = sum(1 for (edge, _) in RESERVATIONS if src in edge)
-    start_time = ml_predict_start_time(priority, delay, congestion)
     PER_EDGE_STEPS = 16
     MAX_RETRY = 1200
+    start_time = 0
     attempts, found_path, found_start = 0, None, None
     while attempts < MAX_RETRY:
         H = build_congestion_aware_graph(start_time, per_edge_steps=PER_EDGE_STEPS)
@@ -139,7 +103,8 @@ async def schedule_train(req: Request):
                         collision = True
                         break
                     tcur += 1
-                if collision: break
+                if collision:
+                    break
             if not collision:
                 tcur = start_time
                 for i in range(len(candidate) - 1):
@@ -153,26 +118,22 @@ async def schedule_train(req: Request):
         attempts += 1
     if not found_path:
         return JSONResponse({"ok": False, "error": "could not find free path"})
-    # CLear previous train (allow only one)
     global TRAIN
     TRAIN = {
         "id": str(uuid.uuid4())[:6],
         "path": found_path,
         "position": GRAPH_NODES[src],
-        "status": "waiting (delayed)" if delay > 0 else "scheduled",
+        "status": "scheduled",
         "start_time": found_start if found_start is not None else 0,
-        "delay": delay,
-        "priority": priority,
-        "congestion": congestion
     }
     asyncio.create_task(simulate_train(TRAIN.copy()))
     return JSONResponse({
-        "ok":True, "train_id":TRAIN["id"], "path":found_path,
-        "start_time":TRAIN["start_time"], "delay":TRAIN["delay"],
-        "priority":TRAIN["priority"]
+        "ok": True,
+        "train_id": TRAIN["id"],
+        "path": found_path,
+        "start_time": TRAIN["start_time"],
     })
 
-# --- WebSocket for live updates ---
 async def broadcast(msg: dict):
     dead = []
     for ws in list(CLIENTS):
@@ -190,7 +151,6 @@ async def ws_endpoint(ws: WebSocket):
     await ws.send_json({"type": "hello", "graph": True})
     try:
         while True:
-            # Only broadcast current train status
             await ws.send_json({"type": "train_update", "train": TRAIN if TRAIN else {}})
             await asyncio.sleep(1)
     except Exception:
