@@ -2,44 +2,77 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AI Train Scheduler</title>
+  <title>AI Subway Train Scheduler</title>
   <style>
     body { margin:0; background:#0b1220; color:white; font-family:Arial; }
     #app { display:flex; height:100vh; }
     #map { flex:1; position:relative; }
     svg { width:100%; height:100%; background: linear-gradient(#081018,#0b1220); }
-    #panel { width:360px; padding:16px; background:#111827; overflow:auto; }
-    select,input,button { width:100%; margin:4px 0; padding:6px; }
-    .station-label { font-size:12px; fill:#fff; }
+    #optimalPathBig {
+      padding:30px 0;
+      text-align:center;
+      font-size:2.6em;
+      color:#fbbf24;
+      font-weight:bold;
+      min-height:2.7em;
+      letter-spacing:2px;
+    }
+    #panel { width:340px; padding:16px; background:#111827; overflow:auto; }
+    select, input, button { width:100%; margin:4px 0; padding:6px; font-size:1em; }
+    .station-label { font-size:13px; fill:#fff; font-weight:bold; pointer-events:none; }
+    #trainStatus { margin:12px 0; padding:7px 0; font-size:1.1em; color:#93c5fd; }
+    #log { font-size:12px; max-height:180px; overflow:auto; background:rgba(0,0,0,0.1); margin-top:10px;}
+    /* Responsive (optional) */
+    @media (max-width:900px){ #app{ flex-direction:column;} #panel{width:100%;height:auto;} #map{height:350px;} }
   </style>
 </head>
 <body>
   <div id="app">
-    <div id="map"><svg id="svgmap" viewBox="0 0 800 600"></svg></div>
+    <div id="map" style="display:flex;flex-direction:column;">
+      <svg id="svgmap" viewBox="0 0 800 600"></svg>
+      <div id="optimalPathBig"></div>
+    </div>
     <div id="panel">
-      <h3>Multi-Train Scheduler</h3>
-      <div id="trainInputs"></div>
-      <button id="addBtn">➕ Add Train</button>
-      <button id="scheduleBtn">🚂 Schedule All</button>
+      <h3>AI Train Scheduler</h3>
+      <div>
+        <label>Source Station:</label>
+        <select id="srcSelect"></select>
+        <label>Destination Station:</label>
+        <select id="dstSelect"></select>
+        <label>Delay (seconds):</label>
+        <input type="number" id="delayInput" value=0 min=0 />
+        <label>Priority (lower = earlier):</label>
+        <input type="number" id="priorityInput" value=1 min=1 />
+        <button id="scheduleBtn">🚂 Schedule Train</button>
+      </div>
       <hr/>
-      <strong>Active Trains</strong>
-      <ul id="trainList"></ul>
-      <div id="log" style="font-size:12px; max-height:200px; overflow:auto;"></div>
+      <strong>Status</strong>
+      <div id="trainStatus">No train scheduled</div>
+      <div id="log"></div>
     </div>
   </div>
 
 <script>
 const svg = document.getElementById("svgmap");
-const trainList = document.getElementById("trainList");
+const optimalPathBig = document.getElementById("optimalPathBig");
 const log = document.getElementById("log");
-const inputsDiv = document.getElementById("trainInputs");
-let nodes = {}, edges = [], trains = {};
+const statusDiv = document.getElementById("trainStatus");
 
-function logMsg(s){
-  const d = document.createElement("div");
-  d.textContent = `[${new Date().toLocaleTimeString()}] ${s}`;
-  log.prepend(d);
-}
+let nodes = {}, edges = [], train = null, stationsList = [];
+
+// Subway map: station coordinates
+const STATION_COORDS = {
+  "S1": [100, 100],   "S2": [260, 60],   "S3": [420, 80],
+  "S4": [600, 100],   "S5": [680, 250],  "S6": [620, 400],
+  "S7": [400, 360],   "S8": [230, 350],  "S9": [110, 250],
+  "S10": [330, 180]
+};
+// Map edges for realistic lines
+const STATION_EDGES = [
+  ["S1","S2"], ["S2","S3"], ["S3","S4"], ["S4","S5"],
+  ["S5","S6"], ["S6","S7"], ["S7","S8"], ["S8","S9"], ["S9","S1"],
+  ["S3","S10"], ["S10","S7"], ["S2","S10"], ["S10","S8"]
+];
 
 function drawGraph(){
   svg.innerHTML = "";
@@ -48,141 +81,136 @@ function drawGraph(){
     const line=document.createElementNS("http://www.w3.org/2000/svg","line");
     line.setAttribute("x1",u.pos[0]); line.setAttribute("y1",u.pos[1]);
     line.setAttribute("x2",v.pos[0]); line.setAttribute("y2",v.pos[1]);
-    line.setAttribute("stroke","#6b7280"); line.setAttribute("stroke-width","4");
-    line.setAttribute("id",`edge-${e.u}-${e.v}`);
+    line.setAttribute("stroke","#6ee7b7"); line.setAttribute("stroke-width","7");
     svg.appendChild(line);
   });
   for(const k in nodes){
     const n=nodes[k];
     const circle=document.createElementNS("http://www.w3.org/2000/svg","circle");
     circle.setAttribute("cx",n.pos[0]); circle.setAttribute("cy",n.pos[1]);
-    circle.setAttribute("r",10); circle.setAttribute("fill","#fbbf24");
+    circle.setAttribute("r",12); circle.setAttribute("fill","#fbbf24");
     svg.appendChild(circle);
     const text=document.createElementNS("http://www.w3.org/2000/svg","text");
-    text.setAttribute("x",n.pos[0]+14); text.setAttribute("y",n.pos[1]+4);
+    text.setAttribute("x",n.pos[0]+16); text.setAttribute("y",n.pos[1]+5);
     text.setAttribute("class","station-label"); text.textContent=k;
     svg.appendChild(text);
   }
+  // Layer for train marker
   const trainsLayer=document.createElementNS("http://www.w3.org/2000/svg","g");
   trainsLayer.setAttribute("id","trainsLayer"); svg.appendChild(trainsLayer);
 }
 
-function updateTrainsUI(){
+function updateTrainUI(){
   const layer=document.getElementById("trainsLayer");
-  if(!layer) return; layer.innerHTML=""; trainList.innerHTML="";
+  if(!layer) return; layer.innerHTML="";
   edges.forEach(e=>{
-    const line=document.getElementById(`edge-${e.u}-${e.v}`);
-    if(line) line.setAttribute("stroke","#6b7280");
+    svg.querySelectorAll('line').forEach(line => line.setAttribute("stroke","#6ee7b7"));
   });
-
-  Object.values(trains).forEach(t=>{
-    const pos=t.position || nodes[t.path[0]].pos;
+  if(train && train.path){
+    // Show train position
+    const pos=train.position || (train.path && nodes[train.path[0]] ? nodes[train.path[0]].pos : [0,0]);
     const g=document.createElementNS("http://www.w3.org/2000/svg","g");
     const c=document.createElementNS("http://www.w3.org/2000/svg","circle");
-    c.setAttribute("cx",pos[0]); c.setAttribute("cy",pos[1]);
-    c.setAttribute("r",7);
-    c.setAttribute("fill", t.status && t.status.includes("waiting") ? "#facc15" : "#60a5fa");
+    c.setAttribute("cx",pos[0]); c.setAttribute("cy",pos[1]); c.setAttribute("r",10);
+    c.setAttribute("fill", train.status && train.status.includes("waiting") ? "#fde68a" : "#60a5fa");
     g.appendChild(c);
-    const label=document.createElementNS("http://www.w3.org/2000/svg","text");
-    label.setAttribute("x",pos[0]+10); label.setAttribute("y",pos[1]+4);
-    label.setAttribute("fill","#fff"); label.setAttribute("font-size","11");
-    label.textContent=t.id; g.appendChild(label);
-    layer.appendChild(g);
-
-    const li=document.createElement("li");
-    li.textContent=`${t.id} - ${t.status}`;
-    trainList.appendChild(li);
-
-    if(t.path){
-      for(let i=0;i<t.path.length-1;i++){
-        const eId1=`edge-${t.path[i]}-${t.path[i+1]}`;
-        const eId2=`edge-${t.path[i+1]}-${t.path[i]}`;
-        let line=document.getElementById(eId1) || document.getElementById(eId2);
-        if(line) line.setAttribute("stroke","#ef4444");
+    // Highlight train path
+    if(train.path){
+      for(let i=0;i<train.path.length-1;i++){
+        svg.querySelectorAll('line').forEach(line => {
+          const [x1,y1] = nodes[train.path[i]].pos, [x2,y2] = nodes[train.path[i+1]].pos;
+          if(
+            (line.getAttribute("x1")==x1 && line.getAttribute("y1")==y1 &&
+             line.getAttribute("x2")==x2 && line.getAttribute("y2")==y2) ||
+            (line.getAttribute("x1")==x2 && line.getAttribute("y1")==y2 &&
+             line.getAttribute("x2")==x1 && line.getAttribute("y2")==y1)
+          ) line.setAttribute("stroke","#ef4444");
+        });
       }
     }
-  });
+    g.innerHTML+=`<text x="${pos[0]+10}" y="${pos[1]+4}" fill="#fff" font-size="15">🚋</text>`;
+    layer.appendChild(g);
+    statusDiv.textContent = `${train.id ? "Train "+train.id : "Train"}: ${train.status||"?"}`;
+  } else {
+    statusDiv.textContent = "No train scheduled";
+  }
 }
 
-async function loadGraph(){
-  const res=await fetch("http://localhost:8000/graph");
-  const j=await res.json();
-  nodes={};
-  if(j.nodes){
-    Object.entries(j.nodes).forEach(([k,v])=>{
-      nodes[k]={pos:v.pos};
-    });
-  }
-  edges=j.edges || [];
+function logMsg(s){
+  const d = document.createElement("div");
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${s}`;
+  log.prepend(d);
+}
+
+function loadGraph(){
+  nodes = {};
+  Object.entries(STATION_COORDS).forEach(([k,v])=>{ nodes[k]={pos:v}; });
+  edges = STATION_EDGES.map(e=>({u:e[0],v:e[1]}));
+  stationsList = Object.keys(STATION_COORDS);
+  // Update selects
+  const srcSel=document.getElementById("srcSelect"), dstSel=document.getElementById("dstSelect");
+  srcSel.innerHTML=""; dstSel.innerHTML="";
+  stationsList.forEach(k=>{
+    srcSel.innerHTML+=`<option value="${k}">${k}</option>`;
+    dstSel.innerHTML+=`<option value="${k}">${k}</option>`;
+  });
   drawGraph();
 }
 
-function addTrainInput(){
-  const div=document.createElement("div"); div.className="train-entry";
-  const src=document.createElement("select"); src.className="src";
-  const dst=document.createElement("select"); dst.className="dst";
-  Object.keys(nodes).forEach(k=>{
-    const o1=document.createElement("option"); o1.value=k;o1.textContent=k; src.appendChild(o1);
-    const o2=document.createElement("option"); o2.value=k;o2.textContent=k; dst.appendChild(o2);
-  });
-  const delay=document.createElement("input");
-  delay.type="number"; delay.min="0"; delay.value="0";
-  delay.placeholder="Delay (s)";
-  delay.className="delay";
-  const priority=document.createElement("input");
-  priority.type="number"; priority.min="1"; priority.value="1";
-  priority.placeholder="Priority (higher=earlier)";
-  priority.className="priority";
-  div.appendChild(src); 
-  div.appendChild(dst);
-  div.appendChild(delay);
-  div.appendChild(priority);
-  inputsDiv.appendChild(div);
-}
-
-document.getElementById("addBtn").addEventListener("click", addTrainInput);
 document.getElementById("scheduleBtn").addEventListener("click", async ()=>{
-  let trainsReq=[];
-  document.querySelectorAll(".train-entry").forEach(div=>{
-    trainsReq.push({
-      source: div.querySelector(".src").value, 
-      destination: div.querySelector(".dst").value,
-      delay: parseInt(div.querySelector(".delay").value || "0"),
-      priority: parseInt(div.querySelector(".priority").value || "1")
+  optimalPathBig.textContent="";
+  train=null; updateTrainUI();
+  logMsg("Scheduling...");
+  // Inputs
+  const src=document.getElementById("srcSelect").value;
+  const dst=document.getElementById("dstSelect").value;
+  const delay=parseInt(document.getElementById("delayInput").value||"0");
+  const priority=parseInt(document.getElementById("priorityInput").value||"1");
+  if(src==dst){ 
+    logMsg("Source and destination cannot be same."); 
+    optimalPathBig.textContent = "Pick different stations!";
+    return; 
+  }
+  // Backend call
+  try{
+    const res=await fetch("http://localhost:8000/schedule_train",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({source:src,destination:dst,delay,priority})
     });
-  });
-  const res=await fetch("http://localhost:8000/schedule_batch",{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify(trainsReq)
-  });
-  const j=await res.json();
-  if(j.results){
-    j.results.forEach(r=>{
-      if(r.ok) logMsg(`Scheduled train ${r.train_id} ${r.path} (delay ${r.delay}s, priority ${r.priority})`);
-      else logMsg("Failed: "+r.error);
-    });
+    const j=await res.json();
+    if(j.ok){
+      logMsg(`Scheduled train ${j.train_id}, path: ${j.path.join(" → ")}`);
+      optimalPathBig.textContent="Optimal Path: " + j.path.join(" → ");
+      setTimeout(()=>optimalPathBig.textContent="",35000);
+    } else {
+      logMsg("Schedule failed: "+ (j.error||"Unknown"));
+      optimalPathBig.textContent = "";
+    }
+  }catch(e){
+    logMsg("Schedule request failed: " + e.message);
+    optimalPathBig.textContent = "";
   }
 });
 
 function startWS(){
   const ws=new WebSocket("ws://localhost:8000/ws");
-  ws.onopen=()=>logMsg("WS connected");
+  ws.onopen=()=>{ logMsg("WS connected"); };
   ws.onmessage=(ev)=>{
     try{
       const d=JSON.parse(ev.data);
       if(d.type==="train_update" && d.train){
-        trains[d.train.id]=d.train;
-        updateTrainsUI();
-      } else if(d.type==="heartbeat" && d.trains){
-        d.trains.forEach(t=>{ trains[t.id]=t; });
-        updateTrainsUI();
+        train = d.train;
+        updateTrainUI();
       }
     }catch(e){ console.error(e); }
   };
-  ws.onclose=()=>setTimeout(startWS,2000);
+  ws.onclose=()=>{ logMsg("WS closed - reconnecting..."); setTimeout(startWS,1800); };
+  ws.onerror=(e)=>{ console.error("WS error", e);}
 }
 
-(async()=>{ await loadGraph(); addTrainInput(); startWS(); })();
+loadGraph();
+updateTrainUI();
+startWS();
 </script>
 </body>
 </html>
