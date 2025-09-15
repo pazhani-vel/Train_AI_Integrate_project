@@ -70,19 +70,18 @@ function drawGraph(){
 function updateTrainsUI(){
   const layer=document.getElementById("trainsLayer");
   if(!layer) return; layer.innerHTML=""; trainList.innerHTML="";
-  // Reset all edges color
   edges.forEach(e=>{
     const line=document.getElementById(`edge-${e.u}-${e.v}`);
     if(line) line.setAttribute("stroke","#6b7280");
   });
 
   Object.values(trains).forEach(t=>{
-    const pos=t.position||nodes[t.path[0]].pos;
+    const pos=t.position || nodes[t.path[0]].pos;
     const g=document.createElementNS("http://www.w3.org/2000/svg","g");
     const c=document.createElementNS("http://www.w3.org/2000/svg","circle");
     c.setAttribute("cx",pos[0]); c.setAttribute("cy",pos[1]);
     c.setAttribute("r",7);
-    c.setAttribute("fill", t.status.includes("blocked")?"#f87171":"#60a5fa");
+    c.setAttribute("fill", t.status && t.status.includes("waiting") ? "#facc15" : "#60a5fa");
     g.appendChild(c);
     const label=document.createElementNS("http://www.w3.org/2000/svg","text");
     label.setAttribute("x",pos[0]+10); label.setAttribute("y",pos[1]+4);
@@ -94,12 +93,13 @@ function updateTrainsUI(){
     li.textContent=`${t.id} - ${t.status}`;
     trainList.appendChild(li);
 
-    // Highlight path edges in red for scheduled/moving train
-    for(let i=0;i<t.path.length-1;i++){
-      const eId1=`edge-${t.path[i]}-${t.path[i+1]}`;
-      const eId2=`edge-${t.path[i+1]}-${t.path[i]}`;
-      let line=document.getElementById(eId1) || document.getElementById(eId2);
-      if(line) line.setAttribute("stroke","#ef4444");
+    if(t.path){
+      for(let i=0;i<t.path.length-1;i++){
+        const eId1=`edge-${t.path[i]}-${t.path[i+1]}`;
+        const eId2=`edge-${t.path[i+1]}-${t.path[i]}`;
+        let line=document.getElementById(eId1) || document.getElementById(eId2);
+        if(line) line.setAttribute("stroke","#ef4444");
+      }
     }
   });
 }
@@ -107,14 +107,16 @@ function updateTrainsUI(){
 async function loadGraph(){
   const res=await fetch("http://localhost:8000/graph");
   const j=await res.json();
-  nodes={}; j.nodes && Object.entries(j.nodes).forEach(([k,v])=>{
-    nodes[k]={pos:v.pos};
-  });
-  edges=j.edges;
+  nodes={};
+  if(j.nodes){
+    Object.entries(j.nodes).forEach(([k,v])=>{
+      nodes[k]={pos:v.pos};
+    });
+  }
+  edges=j.edges || [];
   drawGraph();
 }
 
-// Add train input
 function addTrainInput(){
   const div=document.createElement("div"); div.className="train-entry";
   const src=document.createElement("select"); src.className="src";
@@ -123,7 +125,18 @@ function addTrainInput(){
     const o1=document.createElement("option"); o1.value=k;o1.textContent=k; src.appendChild(o1);
     const o2=document.createElement("option"); o2.value=k;o2.textContent=k; dst.appendChild(o2);
   });
-  div.appendChild(src); div.appendChild(dst);
+  const delay=document.createElement("input");
+  delay.type="number"; delay.min="0"; delay.value="0";
+  delay.placeholder="Delay (s)";
+  delay.className="delay";
+  const priority=document.createElement("input");
+  priority.type="number"; priority.min="1"; priority.value="1";
+  priority.placeholder="Priority (higher=earlier)";
+  priority.className="priority";
+  div.appendChild(src); 
+  div.appendChild(dst);
+  div.appendChild(delay);
+  div.appendChild(priority);
   inputsDiv.appendChild(div);
 }
 
@@ -131,20 +144,26 @@ document.getElementById("addBtn").addEventListener("click", addTrainInput);
 document.getElementById("scheduleBtn").addEventListener("click", async ()=>{
   let trainsReq=[];
   document.querySelectorAll(".train-entry").forEach(div=>{
-    trainsReq.push({source: div.querySelector(".src").value, destination: div.querySelector(".dst").value});
+    trainsReq.push({
+      source: div.querySelector(".src").value, 
+      destination: div.querySelector(".dst").value,
+      delay: parseInt(div.querySelector(".delay").value || "0"),
+      priority: parseInt(div.querySelector(".priority").value || "1")
+    });
   });
   const res=await fetch("http://localhost:8000/schedule_batch",{
     method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify(trainsReq)
   });
   const j=await res.json();
-  j.results.forEach(r=>{
-    if(r.ok) logMsg(`Scheduled train ${r.train_id} ${r.path}`);
-    else logMsg("Failed: "+r.error);
-  });
+  if(j.results){
+    j.results.forEach(r=>{
+      if(r.ok) logMsg(`Scheduled train ${r.train_id} ${r.path} (delay ${r.delay}s, priority ${r.priority})`);
+      else logMsg("Failed: "+r.error);
+    });
+  }
 });
 
-// WebSocket live updates
 function startWS(){
   const ws=new WebSocket("ws://localhost:8000/ws");
   ws.onopen=()=>logMsg("WS connected");
@@ -154,10 +173,8 @@ function startWS(){
       if(d.type==="train_update" && d.train){
         trains[d.train.id]=d.train;
         updateTrainsUI();
-      } else if(d.type==="heartbeat"){
-        d.trains.forEach(t=>{
-          trains[t.id]=t;
-        });
+      } else if(d.type==="heartbeat" && d.trains){
+        d.trains.forEach(t=>{ trains[t.id]=t; });
         updateTrainsUI();
       }
     }catch(e){ console.error(e); }
