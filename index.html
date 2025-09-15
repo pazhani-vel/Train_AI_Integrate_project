@@ -22,7 +22,6 @@
     .station-label { font-size:13px; fill:#fff; font-weight:bold; pointer-events:none; }
     #trainStatus { margin:12px 0; padding:7px 0; font-size:1.1em; color:#93c5fd; }
     #log { font-size:12px; max-height:180px; overflow:auto; background:rgba(0,0,0,0.1); margin-top:10px;}
-    /* Responsive (optional) */
     @media (max-width:900px){ #app{ flex-direction:column;} #panel{width:100%;height:auto;} #map{height:350px;} }
   </style>
 </head>
@@ -39,10 +38,6 @@
         <select id="srcSelect"></select>
         <label>Destination Station:</label>
         <select id="dstSelect"></select>
-        <label>Delay (seconds):</label>
-        <input type="number" id="delayInput" value=0 min=0 />
-        <label>Priority (lower = earlier):</label>
-        <input type="number" id="priorityInput" value=1 min=1 />
         <button id="scheduleBtn">🚂 Schedule Train</button>
       </div>
       <hr/>
@@ -60,18 +55,21 @@ const statusDiv = document.getElementById("trainStatus");
 
 let nodes = {}, edges = [], train = null, stationsList = [];
 
-// Subway map: station coordinates
+// 15 stations with coordinates
 const STATION_COORDS = {
-  "S1": [100, 100],   "S2": [260, 60],   "S3": [420, 80],
-  "S4": [600, 100],   "S5": [680, 250],  "S6": [620, 400],
-  "S7": [400, 360],   "S8": [230, 350],  "S9": [110, 250],
-  "S10": [330, 180]
+  "S1": [100, 100],  "S2": [260, 60],  "S3": [420, 80],
+  "S4": [600, 100],  "S5": [680, 250], "S6": [620, 400],
+  "S7": [400, 360],  "S8": [230, 350], "S9": [110, 250],
+  "S10": [330, 180], "S11": [520, 250], "S12": [550, 350],
+  "S13": [720, 320], "S14": [140, 170], "S15": [700, 450]
 };
-// Map edges for realistic lines
+// Edges defining routes
 const STATION_EDGES = [
   ["S1","S2"], ["S2","S3"], ["S3","S4"], ["S4","S5"],
   ["S5","S6"], ["S6","S7"], ["S7","S8"], ["S8","S9"], ["S9","S1"],
-  ["S3","S10"], ["S10","S7"], ["S2","S10"], ["S10","S8"]
+  ["S3","S10"], ["S10","S7"], ["S2","S10"], ["S10","S8"],
+  ["S5","S11"], ["S11","S12"], ["S12","S6"], ["S11","S13"],
+  ["S9","S14"], ["S13","S15"], ["S6","S15"]
 ];
 
 function drawGraph(){
@@ -95,7 +93,6 @@ function drawGraph(){
     text.setAttribute("class","station-label"); text.textContent=k;
     svg.appendChild(text);
   }
-  // Layer for train marker
   const trainsLayer=document.createElementNS("http://www.w3.org/2000/svg","g");
   trainsLayer.setAttribute("id","trainsLayer"); svg.appendChild(trainsLayer);
 }
@@ -107,14 +104,12 @@ function updateTrainUI(){
     svg.querySelectorAll('line').forEach(line => line.setAttribute("stroke","#6ee7b7"));
   });
   if(train && train.path){
-    // Show train position
     const pos=train.position || (train.path && nodes[train.path[0]] ? nodes[train.path[0]].pos : [0,0]);
     const g=document.createElementNS("http://www.w3.org/2000/svg","g");
     const c=document.createElementNS("http://www.w3.org/2000/svg","circle");
     c.setAttribute("cx",pos[0]); c.setAttribute("cy",pos[1]); c.setAttribute("r",10);
     c.setAttribute("fill", train.status && train.status.includes("waiting") ? "#fde68a" : "#60a5fa");
     g.appendChild(c);
-    // Highlight train path
     if(train.path){
       for(let i=0;i<train.path.length-1;i++){
         svg.querySelectorAll('line').forEach(line => {
@@ -147,7 +142,6 @@ function loadGraph(){
   Object.entries(STATION_COORDS).forEach(([k,v])=>{ nodes[k]={pos:v}; });
   edges = STATION_EDGES.map(e=>({u:e[0],v:e[1]}));
   stationsList = Object.keys(STATION_COORDS);
-  // Update selects
   const srcSel=document.getElementById("srcSelect"), dstSel=document.getElementById("dstSelect");
   srcSel.innerHTML=""; dstSel.innerHTML="";
   stationsList.forEach(k=>{
@@ -161,21 +155,17 @@ document.getElementById("scheduleBtn").addEventListener("click", async ()=>{
   optimalPathBig.textContent="";
   train=null; updateTrainUI();
   logMsg("Scheduling...");
-  // Inputs
   const src=document.getElementById("srcSelect").value;
   const dst=document.getElementById("dstSelect").value;
-  const delay=parseInt(document.getElementById("delayInput").value||"0");
-  const priority=parseInt(document.getElementById("priorityInput").value||"1");
-  if(src==dst){ 
-    logMsg("Source and destination cannot be same."); 
+  if(src==dst){
+    logMsg("Source and destination cannot be same.");
     optimalPathBig.textContent = "Pick different stations!";
-    return; 
+    return;
   }
-  // Backend call
   try{
     const res=await fetch("http://localhost:8000/schedule_train",{
       method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({source:src,destination:dst,delay,priority})
+      body:JSON.stringify({source:src,destination:dst})
     });
     const j=await res.json();
     if(j.ok){
