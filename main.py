@@ -34,7 +34,6 @@ TRAINS = {}
 RESERVATIONS = {}  # (edge, time_step) -> train_id
 CLIENTS = set()
 
-
 # ---------------- GRAPH ENDPOINT ----------------
 @app.get("/graph")
 async def get_graph():
@@ -43,13 +42,12 @@ async def get_graph():
         "edges": [{"u": u, "v": v} for u, v in GRAPH_EDGES],
     }
 
-
 # ---------------- RESERVATION LOGIC ----------------
 def is_path_free(path, start_time=0):
     t = start_time
     for i in range(len(path) - 1):
         edge = tuple(sorted((path[i], path[i + 1])))
-        for step in range(20):
+        for step in range(20):  # simulate time steps along edge
             if (edge, t) in RESERVATIONS:
                 return False
             t += 1
@@ -63,9 +61,9 @@ def reserve_path(path, train_id, start_time=0):
             RESERVATIONS[(edge, t)] = train_id
             t += 1
 
-
 # ---------------- TRAIN SIMULATION ----------------
 async def simulate_train(train):
+    await asyncio.sleep(train["delay"])  # initial departure delay
     path = train["path"]
     t_step = train["start_time"]
 
@@ -79,30 +77,35 @@ async def simulate_train(train):
             train["position"] = (x, y)
             train["status"] = f"moving {u}->{v}"
             await broadcast({"type": "train_update", "train": train})
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.3)  # adjust speed
         t_step += 20
 
     train["status"] = "arrived"
     train["position"] = GRAPH_NODES[path[-1]]
     await broadcast({"type": "train_update", "train": train})
 
-
 # ---------------- SCHEDULE BATCH ----------------
 @app.post("/schedule_batch")
 async def schedule_batch(req: Request):
     trains_req = await req.json()
+    # sort by priority (lower number = higher priority)
+    trains_req.sort(key=lambda t: t.get("priority", 5))
     results = []
 
     for t in trains_req:
         src, dst = t["source"], t["destination"]
         tid = str(uuid.uuid4())[:6]
+        delay = int(t.get("delay", 0))
+        priority = int(t.get("priority", 5))
 
-        # find all simple paths
+        # generate all paths sorted by shortest path first
         paths = list(nx.all_simple_paths(G, src, dst))
+        paths.sort(key=lambda p: nx.path_weight(G, p, "weight"))
+
         found_path = None
         start_time = 0
 
-        # Try each path to find one that is free
+        # assign first available path that is free in RESERVATIONS
         while True:
             for p in paths:
                 if is_path_free(p, start_time):
@@ -111,21 +114,22 @@ async def schedule_batch(req: Request):
                     break
             if found_path:
                 break
-            start_time += 20  # wait until free
+            start_time += 20  # wait and retry
 
         train = {
             "id": tid,
             "path": found_path,
             "position": GRAPH_NODES[src],
-            "status": "scheduled",
-            "start_time": start_time
+            "status": "waiting (delayed)" if delay > 0 else "scheduled",
+            "start_time": start_time,
+            "delay": delay,
+            "priority": priority
         }
         TRAINS[tid] = train
         asyncio.create_task(simulate_train(train))
         results.append({"train_id": tid, "ok": True, "path": found_path})
 
     return JSONResponse({"results": results})
-
 
 # ---------------- WEBSOCKET ----------------
 async def broadcast(msg: dict):
@@ -137,7 +141,6 @@ async def broadcast(msg: dict):
             dead.append(ws)
     for d in dead:
         CLIENTS.remove(d)
-
 
 @app.websocket("/ws")
 async def ws(ws: WebSocket):
